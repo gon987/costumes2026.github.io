@@ -1,2 +1,563 @@
-# costumes2026.github.io
-Costume contest  page
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Waze Costume Contest</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Phosphor Icons -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, doc, updateDoc, arrayUnion, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Expose Firebase to window for the React component
+        window.firebaseModules = {
+            initializeApp, getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken,
+            getFirestore, collection, addDoc, onSnapshot, doc, updateDoc, arrayUnion, serverTimestamp
+        };
+    </script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Boogaloo&family=Inter:wght@400;500;600;700&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+        
+        .waze-font {
+            font-family: 'Boogaloo', cursive;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1; 
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1; 
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8; 
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        const { useState, useEffect, useRef } = React;
+
+        // Access Firebase modules
+        const { 
+            initializeApp, getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken,
+            getFirestore, collection, addDoc, onSnapshot, doc, updateDoc, arrayUnion, serverTimestamp 
+        } = window.firebaseModules;
+
+        // --- Firebase Initialization ---
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        // --- Helper: Resize Image ---
+        // Resizes image to max 600px width/height to fit in Firestore document limits comfortably
+        const resizeImage = (file) => {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        let width = img.width;
+                        let height = img.height;
+                        const MAX_SIZE = 600;
+
+                        if (width > height) {
+                            if (width > MAX_SIZE) {
+                                height *= MAX_SIZE / width;
+                                width = MAX_SIZE;
+                            }
+                        } else {
+                            if (height > MAX_SIZE) {
+                                width *= MAX_SIZE / height;
+                                height = MAX_SIZE;
+                            }
+                        }
+
+                        canvas.width = width;
+                        canvas.height = height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, width, height);
+                        resolve(canvas.toDataURL('image/jpeg', 0.8));
+                    };
+                    img.src = event.target.result;
+                };
+                reader.readAsDataURL(file);
+            });
+        };
+
+        // --- Component: Modal ---
+        const Modal = ({ isOpen, title, onClose, children }) => {
+            if (!isOpen) return null;
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+                    <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden transform transition-all">
+                        <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center bg-blue-50">
+                            <h3 className="text-lg font-bold text-gray-800">{title}</h3>
+                            <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+                                <i className="ph ph-x text-xl"></i>
+                            </button>
+                        </div>
+                        <div className="p-6">
+                            {children}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Main Component ---
+        const App = () => {
+            const [user, setUser] = useState(null);
+            const [costumes, setCostumes] = useState([]);
+            const [isLoading, setIsLoading] = useState(true);
+            
+            // Upload State
+            const [uploadLdap, setUploadLdap] = useState('');
+            const [selectedFile, setSelectedFile] = useState(null);
+            const [previewUrl, setPreviewUrl] = useState(null);
+            const [isUploading, setIsUploading] = useState(false);
+            const [uploadError, setUploadError] = useState('');
+            
+            // Vote State
+            const [voteModalOpen, setVoteModalOpen] = useState(false);
+            const [currentVoteId, setCurrentVoteId] = useState(null);
+            const [voterLdap, setVoterLdap] = useState('');
+            const [voteError, setVoteError] = useState('');
+
+            // --- Auth & Data Fetching ---
+            useEffect(() => {
+                const initAuth = async () => {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                };
+                initAuth();
+                const unsubscribe = onAuthStateChanged(auth, (u) => setUser(u));
+                return () => unsubscribe();
+            }, []);
+
+            useEffect(() => {
+                if (!user) return;
+                
+                // Using the specific path required by the environment
+                const q = collection(db, 'artifacts', appId, 'public', 'data', 'waze-costumes');
+                
+                const unsubscribe = onSnapshot(q, (snapshot) => {
+                    const loadedCostumes = snapshot.docs.map(doc => ({
+                        id: doc.id,
+                        ...doc.data()
+                    }));
+                    setCostumes(loadedCostumes);
+                    setIsLoading(false);
+                }, (error) => {
+                    console.error("Error fetching costumes:", error);
+                    setIsLoading(false);
+                });
+
+                return () => unsubscribe();
+            }, [user]);
+
+            // --- Handlers ---
+
+            const handleFileSelect = async (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    // Check file size (raw check, 5MB limit before resize)
+                    if (file.size > 5 * 1024 * 1024) {
+                        setUploadError("File is too large. Please choose an image under 5MB.");
+                        return;
+                    }
+                    setSelectedFile(file);
+                    setUploadError('');
+                    
+                    // Create preview
+                    const reader = new FileReader();
+                    reader.onloadend = () => setPreviewUrl(reader.result);
+                    reader.readAsDataURL(file);
+                }
+            };
+
+            const handleUpload = async (e) => {
+                e.preventDefault();
+                if (!selectedFile || !uploadLdap.trim()) {
+                    setUploadError("Please select a photo and enter your LDAP.");
+                    return;
+                }
+
+                setIsUploading(true);
+                try {
+                    const base64Image = await resizeImage(selectedFile);
+                    
+                    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'waze-costumes'), {
+                        ldap: uploadLdap.trim(),
+                        image: base64Image,
+                        votes: [], // Array of LDAPs who voted
+                        createdAt: serverTimestamp()
+                    });
+
+                    // Reset form
+                    setUploadLdap('');
+                    setSelectedFile(null);
+                    setPreviewUrl(null);
+                    setUploadError('');
+                } catch (err) {
+                    console.error("Upload failed:", err);
+                    setUploadError("Failed to upload. Please try again.");
+                } finally {
+                    setIsUploading(false);
+                }
+            };
+
+            const openVoteModal = (costumeId) => {
+                setCurrentVoteId(costumeId);
+                setVoterLdap('');
+                setVoteError('');
+                setVoteModalOpen(true);
+            };
+
+            const handleVote = async () => {
+                if (!voterLdap.trim()) {
+                    setVoteError("Please enter your LDAP to vote.");
+                    return;
+                }
+                
+                const costume = costumes.find(c => c.id === currentVoteId);
+                if (!costume) return;
+
+                const cleanLdap = voterLdap.trim().toLowerCase();
+
+                // Check if already voted
+                if (costume.votes && costume.votes.map(v => v.toLowerCase()).includes(cleanLdap)) {
+                    setVoteError("You have already voted for this costume!");
+                    return;
+                }
+
+                try {
+                    const costumeRef = doc(db, 'artifacts', appId, 'public', 'data', 'waze-costumes', currentVoteId);
+                    await updateDoc(costumeRef, {
+                        votes: arrayUnion(cleanLdap)
+                    });
+                    setVoteModalOpen(false);
+                } catch (err) {
+                    console.error("Vote failed:", err);
+                    setVoteError("Failed to submit vote. Try again.");
+                }
+            };
+
+            // Sorted costumes for ranking
+            const sortedCostumes = [...costumes].sort((a, b) => (b.votes?.length || 0) - (a.votes?.length || 0));
+
+            return (
+                <div className="min-h-screen pb-12">
+                    {/* Header */}
+                    <header className="bg-white shadow-sm sticky top-0 z-40">
+                        <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className="bg-blue-500 text-white p-2 rounded-xl">
+                                    <i className="ph ph-mask-happy text-2xl"></i>
+                                </div>
+                                <h1 className="text-2xl font-bold text-gray-800 waze-font tracking-wide">
+                                    Waze Costume Contest
+                                </h1>
+                            </div>
+                            <div className="text-sm text-gray-500 hidden sm:block">
+                                Internal Voting Portal
+                            </div>
+                        </div>
+                    </header>
+
+                    <main className="max-w-6xl mx-auto px-4 py-8 space-y-12">
+                        
+                        {/* Upload Section */}
+                        <section className="bg-white rounded-3xl p-6 md:p-8 shadow-lg border border-blue-100 relative overflow-hidden">
+                            <div className="absolute top-0 right-0 w-32 h-32 bg-yellow-100 rounded-bl-full -mr-16 -mt-16 z-0 opacity-50"></div>
+                            
+                            <div className="relative z-10 max-w-2xl mx-auto text-center">
+                                <h2 className="text-3xl font-bold text-gray-800 mb-2 waze-font">Enter the Contest</h2>
+                                <p className="text-gray-500 mb-8">Upload a photo of your costume to join the fun!</p>
+
+                                <form onSubmit={handleUpload} className="space-y-6 text-left bg-gray-50 p-6 rounded-2xl border border-gray-100">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        
+                                        {/* Image Input */}
+                                        <div className="space-y-2">
+                                            <label className="block text-sm font-semibold text-gray-700">Costume Photo</label>
+                                            <div className="relative group">
+                                                <input 
+                                                    type="file" 
+                                                    accept="image/*"
+                                                    onChange={handleFileSelect}
+                                                    className="hidden" 
+                                                    id="file-upload"
+                                                />
+                                                <label 
+                                                    htmlFor="file-upload"
+                                                    className={`
+                                                        flex flex-col items-center justify-center w-full h-48 border-2 border-dashed rounded-xl cursor-pointer transition-colors
+                                                        ${previewUrl ? 'border-blue-400 bg-blue-50' : 'border-gray-300 hover:border-blue-400 hover:bg-white'}
+                                                    `}
+                                                >
+                                                    {previewUrl ? (
+                                                        <img src={previewUrl} className="h-full w-full object-contain rounded-lg" alt="Preview" />
+                                                    ) : (
+                                                        <div className="text-center p-4">
+                                                            <i className="ph ph-camera-plus text-3xl text-gray-400 mb-2"></i>
+                                                            <p className="text-sm text-gray-500 font-medium">Click to upload photo</p>
+                                                        </div>
+                                                    )}
+                                                </label>
+                                            </div>
+                                        </div>
+
+                                        {/* LDAP Input */}
+                                        <div className="space-y-4">
+                                            <div>
+                                                <label className="block text-sm font-semibold text-gray-700 mb-1">Your LDAP</label>
+                                                <input
+                                                    type="text"
+                                                    value={uploadLdap}
+                                                    onChange={(e) => setUploadLdap(e.target.value)}
+                                                    placeholder="e.g. jdoe"
+                                                    className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+                                                />
+                                            </div>
+                                            
+                                            <div className="pt-4">
+                                                <button 
+                                                    type="submit" 
+                                                    disabled={isUploading || !selectedFile}
+                                                    className={`
+                                                        w-full py-3 px-6 rounded-xl font-bold text-white shadow-md transition-all flex items-center justify-center gap-2
+                                                        ${isUploading || !selectedFile ? 'bg-gray-300 cursor-not-allowed' : 'bg-blue-500 hover:bg-blue-600 hover:shadow-lg transform hover:-translate-y-0.5'}
+                                                    `}
+                                                >
+                                                    {isUploading ? (
+                                                        <>
+                                                            <i className="ph ph-spinner animate-spin text-xl"></i> Uploading...
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            Upload Entry <i className="ph ph-upload-simple text-xl"></i>
+                                                        </>
+                                                    )}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    {uploadError && (
+                                        <div className="bg-red-50 text-red-600 px-4 py-3 rounded-xl text-sm flex items-center gap-2">
+                                            <i className="ph ph-warning-circle text-lg"></i> {uploadError}
+                                        </div>
+                                    )}
+                                </form>
+                            </div>
+                        </section>
+
+                        {/* Gallery Section */}
+                        <section>
+                            <div className="flex items-center gap-3 mb-6">
+                                <h2 className="text-2xl font-bold text-gray-800 waze-font">Gallery & Voting</h2>
+                                <span className="bg-blue-100 text-blue-700 text-xs font-bold px-2 py-1 rounded-full">{costumes.length} Entries</span>
+                            </div>
+
+                            {isLoading ? (
+                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                                    {[1, 2, 3].map(i => (
+                                        <div key={i} className="bg-white rounded-3xl h-80 animate-pulse"></div>
+                                    ))}
+                                </div>
+                            ) : costumes.length === 0 ? (
+                                <div className="text-center py-20 bg-white rounded-3xl border border-dashed border-gray-200">
+                                    <i className="ph ph-ghost text-4xl text-gray-300 mb-3"></i>
+                                    <p className="text-gray-500">No costumes yet. Be the first!</p>
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8">
+                                    {costumes.map(costume => (
+                                        <div key={costume.id} className="bg-white rounded-3xl overflow-hidden shadow-sm hover:shadow-xl transition-all duration-300 group border border-gray-100 flex flex-col">
+                                            {/* Image Area */}
+                                            <div className="relative aspect-square bg-gray-100 overflow-hidden">
+                                                <img 
+                                                    src={costume.image} 
+                                                    alt={`Costume by ${costume.ldap}`}
+                                                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                                                />
+                                                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-4 translate-y-2 group-hover:translate-y-0 transition-transform">
+                                                    <p className="text-white font-medium text-lg drop-shadow-md">@{costume.ldap}</p>
+                                                </div>
+                                            </div>
+
+                                            {/* Actions Area */}
+                                            <div className="p-5 flex items-center justify-between bg-white flex-1">
+                                                <div className="flex items-center gap-2 text-gray-700">
+                                                    <i className="ph-fill ph-heart text-red-500 text-xl"></i>
+                                                    <span className="font-bold text-xl">{costume.votes ? costume.votes.length : 0}</span>
+                                                    <span className="text-sm text-gray-400 font-medium">votes</span>
+                                                </div>
+                                                
+                                                <button 
+                                                    onClick={() => openVoteModal(costume.id)}
+                                                    className="bg-gray-900 hover:bg-blue-600 text-white px-5 py-2.5 rounded-full font-medium text-sm transition-colors flex items-center gap-2 shadow-lg shadow-gray-200"
+                                                >
+                                                    Vote <i className="ph-bold ph-thumbs-up"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </section>
+
+                        {/* Ranking Board */}
+                        <section className="bg-white rounded-3xl shadow-lg border border-gray-100 overflow-hidden">
+                            <div className="bg-gradient-to-r from-purple-600 to-indigo-600 p-6 text-white text-center">
+                                <h2 className="text-2xl font-bold waze-font flex items-center justify-center gap-2">
+                                    <i className="ph-fill ph-trophy text-yellow-300"></i> Leaderboard
+                                </h2>
+                            </div>
+                            
+                            <div className="p-0">
+                                {sortedCostumes.length === 0 ? (
+                                    <div className="p-8 text-center text-gray-400">Waiting for votes...</div>
+                                ) : (
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-left">
+                                            <thead className="bg-gray-50 text-gray-500 font-semibold text-xs uppercase tracking-wider">
+                                                <tr>
+                                                    <th className="px-6 py-4">Rank</th>
+                                                    <th className="px-6 py-4">Participant</th>
+                                                    <th className="px-6 py-4 text-right">Score</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-gray-100">
+                                                {sortedCostumes.map((costume, index) => (
+                                                    <tr key={costume.id} className="hover:bg-blue-50/50 transition-colors">
+                                                        <td className="px-6 py-4">
+                                                            <div className={`
+                                                                w-8 h-8 flex items-center justify-center rounded-full font-bold text-sm
+                                                                ${index === 0 ? 'bg-yellow-100 text-yellow-700 ring-2 ring-yellow-200' : 
+                                                                  index === 1 ? 'bg-gray-100 text-gray-700 ring-2 ring-gray-200' :
+                                                                  index === 2 ? 'bg-orange-100 text-orange-800 ring-2 ring-orange-200' : 
+                                                                  'text-gray-500'}
+                                                            `}>
+                                                                {index + 1}
+                                                            </div>
+                                                        </td>
+                                                        <td className="px-6 py-4">
+                                                            <div className="flex items-center gap-3">
+                                                                <img src={costume.image} className="w-10 h-10 rounded-full object-cover border border-gray-200" alt="" />
+                                                                <span className="font-medium text-gray-800">@{costume.ldap}</span>
+                                                            </div>
+                                                        </td>
+                                                        <td className="px-6 py-4 text-right">
+                                                            <span className="font-bold text-gray-900">{costume.votes ? costume.votes.length : 0}</span>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+                            </div>
+                        </section>
+
+                    </main>
+
+                    {/* Footer */}
+                    <footer className="text-center py-8 text-gray-400 text-sm">
+                        <p>&copy; {new Date().getFullYear()} Waze Costume Contest</p>
+                    </footer>
+
+                    {/* Vote Modal */}
+                    <Modal 
+                        isOpen={voteModalOpen} 
+                        onClose={() => setVoteModalOpen(false)}
+                        title="Confirm Your Vote"
+                    >
+                        <div className="space-y-4">
+                            <p className="text-gray-600 text-sm">
+                                To ensure fair play, please enter your LDAP to cast your vote.
+                                You can only vote once per costume.
+                            </p>
+                            
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Your LDAP</label>
+                                <input
+                                    type="text"
+                                    autoFocus
+                                    value={voterLdap}
+                                    onChange={(e) => {
+                                        setVoterLdap(e.target.value);
+                                        setVoteError('');
+                                    }}
+                                    onKeyDown={(e) => e.key === 'Enter' && handleVote()}
+                                    className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                                    placeholder="e.g. jdoe"
+                                />
+                            </div>
+
+                            {voteError && (
+                                <p className="text-red-500 text-sm flex items-center gap-1">
+                                    <i className="ph-fill ph-warning-circle"></i> {voteError}
+                                </p>
+                            )}
+
+                            <div className="pt-2 flex gap-3">
+                                <button 
+                                    onClick={() => setVoteModalOpen(false)}
+                                    className="flex-1 py-2 px-4 rounded-lg font-medium text-gray-600 hover:bg-gray-100 transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button 
+                                    onClick={handleVote}
+                                    className="flex-1 py-2 px-4 rounded-lg font-bold text-white bg-blue-500 hover:bg-blue-600 shadow-md transition-colors"
+                                >
+                                    Submit Vote
+                                </button>
+                            </div>
+                        </div>
+                    </Modal>
+
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
